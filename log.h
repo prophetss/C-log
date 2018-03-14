@@ -26,7 +26,7 @@
 
 #define RUN_LOG_BAK_PATH "run_log_bak.log"    /*备份日志文件路径*/
 
-#define IOBUF_SIZE	1024	/*设置写用户IO缓存大小，不需要时删除此宏即可*/
+#define IOBUF_SIZE	1024	/*设置写用户IO缓存大小，不需要时设置为0即可*/
 
 #define TRACE_PRINT_PATH 	"trace_info"	/*堆栈打印输出路径*/
 
