@@ -6,8 +6,6 @@
 
 /* key length */
 #define AES_128	16
-#define AES_192	24
-#define AES_256	32
 
 #define AES_SUCCESS	0
 #define AES_ERROR	-1
@@ -20,11 +18,9 @@ extern "C" {
 
 int aes_cipher_data(uint8_t *in, size_t in_len, uint8_t *out, uint8_t *key, size_t key_len);
 
-int aes_decipher_data(uint8_t *in, size_t in_len, uint8_t *out, size_t *out_len, uint8_t *key, size_t key_len);
-
-int aes_cipher_file(const char *in_filename, const char *out_filename, uint8_t *key, size_t key_len);
-
 int aes_decipher_file(const char *in_filename, const char *out_filename, uint8_t *key, size_t key_len);
+
+int aes_set_key(unsigned char *key, int len);
 
 #ifdef __cplusplus
 }

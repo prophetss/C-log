@@ -15,7 +15,7 @@ typedef struct MD5Context {
 	unsigned char in[64];
 } MD5_CTX;
 
-void MD5File(const char *filename, unsigned char *digest);
+void MD5File(const char *filename, char *digest);
 
 void MD5Data(const unsigned char *data, unsigned int len, unsigned char *digest);
 

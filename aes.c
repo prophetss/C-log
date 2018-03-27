@@ -9,14 +9,10 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
 #include <sys/stat.h>
 #include "aes.h"
-
-#if defined(__linux__) || defined(__linux)
-#include <unistd.h>
-#define _O_BINARY	0
-#endif
-
 
 /*
  * Addition in GF(2^8)
@@ -391,11 +387,9 @@ void key_expansion(uint8_t *key, uint8_t *w) {
 	}
 }
 
-/*int Nb=4, for  compile error*/
-#define NB_T	4
 void cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
-	uint8_t state[4* NB_T];
+	uint8_t state[4*Nb];
 	uint8_t r, i, j;
 
 	for (i = 0; i < 4; i++) {
@@ -426,7 +420,7 @@ void cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
 void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
-	uint8_t state[4* NB_T];
+	uint8_t state[4*Nb];
 	uint8_t r, i, j;
 
 	for (i = 0; i < 4; i++) {
@@ -454,142 +448,61 @@ void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 		}
 	}
 }
-/* 文件尾部将加密补位数据截断 */
-static void file_tail_truncate(int fo, uint8_t len)
-{
-	ftruncate(fo, len);
-}
+
+uint8_t *lw = NULL; // expanded key
 
 /* 密钥初始化 */
-static int aes_init(uint8_t *key, size_t key_len, uint8_t **w)
+int aes_set_key(unsigned char *key, int len)
 {
-	if (*w != NULL)
-		return AES_SUCCESS;
-
-	switch (key_len) {
-	default:
-	case 16: Nk = 4; Nr = 10; break;
-	case 24: Nk = 6; Nr = 12; break;
-	case 32: Nk = 8; Nr = 14; break;
+	if (lw != NULL) {
+		free(lw);
+		lw = NULL;
 	}
 
-	*w = malloc(Nb*(Nr + 1) * 4);
-	key_expansion(key, *w);
+	switch (sizeof(key)) {
+		default:
+		case 16: Nk = 4; Nr = 10; break;
+		case 24: Nk = 6; Nr = 12; break;
+		case 32: Nk = 8; Nr = 14; break;
+	}
+	
+	lw = malloc(Nb*(Nr+1)*4);
+	if (lw == NULL)
+		return AES_ERROR;
 
+	key_expansion(key, lw);
 	return AES_SUCCESS;
 }
-
 
 int aes_cipher_data(uint8_t *in, size_t in_len, uint8_t *out, uint8_t *key, size_t key_len)
 {
-	size_t quotient = in_len >> 4;
-	uint8_t *w = NULL; // expanded key
-	aes_init(key, key_len, &w);
-	size_t i;
-	for (i = 0; i < quotient; i++)
-		cipher(in + i * 4 * Nb, out + i * 4 * Nb, w);
-
-	/* 结尾填充组，单独处理 */
-	uint8_t padding_bit[4 * NB_T];
-	uint8_t j = 0;
-	quotient = quotient << 4;
-	for (i = quotient; i < in_len; i++, j++)
-		padding_bit[i - quotient] = in[i];
-
-	for (i = j; i < 4 * Nb; i++)
-		padding_bit[i] = 4 * Nb - j;
-
-	cipher(padding_bit, out + quotient, w);
-
-	free(w);
-	w = NULL;
+	cipher(in , out , lw);
 	return AES_SUCCESS;
 }
 
-int aes_decipher_data(uint8_t *in, size_t in_len, uint8_t *out, size_t *out_len, uint8_t *key, size_t key_len)
-{
-	size_t quotient = in_len >> 4;
-	uint8_t *w = NULL; // expanded key
-	aes_init(key, key_len, &w);
-	size_t i;
-	for (i = 0; i < quotient; i++)
-		inv_cipher(in + i * 4 * Nb, out + i * 4 * Nb, w);
-
-	/* 补位长度 */
-	uint8_t j = out[in_len -1];
-
-	/* 实际有效数据长度 */
-	*out_len = in_len - j;
-
-	for (i = 1; i <= j; i++)
-		out[in_len - i] = '\0';
-
-	free(w);
-	w = NULL;
-	return AES_SUCCESS;
-}
-
-int aes_cipher_file(const char *in_filename, const char *out_filename, uint8_t *key, size_t key_len)
-{
-	uint8_t *w = NULL; // expanded key
-	aes_init(key, key_len, &w);
-
-	uint8_t bufferin[AES_BUFSIZ], bufferout[AES_BUFSIZ];
-
-	int fi, fo, i;
-
-
-	fi = open(in_filename, O_RDONLY | _O_BINARY | _O_BINARY);
-	fo = open(out_filename, O_WRONLY | O_CREAT | O_APPEND | _O_BINARY);
-
-	if (fi < 0 || fo < 0)
-		return AES_ERROR;
-
-	while ((i = read(fi, bufferin, AES_BUFSIZ)) >= 0)
-	{
-		if (i < AES_BUFSIZ)	/*读取结束*/
-		{
-			aes_cipher_data(bufferin, i, bufferout, key, key_len);
-			if (write(fo, bufferout, AES_BUFSIZ) != AES_BUFSIZ)
-				return AES_ERROR;
-			break;
-		}
-		cipher(bufferin, bufferout, w);
-		if (write(fo, bufferout, AES_BUFSIZ) != AES_BUFSIZ)
-			return AES_ERROR;
-	}
-	free(w);
-	w = NULL;
-	return AES_SUCCESS;
-}
 
 int aes_decipher_file(const char *in_filename, const char *out_filename, uint8_t *key, size_t key_len)
 {
-	uint8_t *w = NULL; // expanded key
-	aes_init(key, key_len, &w);
-
 	uint8_t bufferin[AES_BUFSIZ], bufferout[AES_BUFSIZ];
 
-	int fi, fo, i, j = 0;
-	fi = open(in_filename, O_RDONLY | _O_BINARY | _O_BINARY);
-	fo = open(out_filename, O_WRONLY | O_CREAT | O_APPEND | _O_BINARY);
+	int fi, fo, i, j;
+	fi = open(in_filename, O_RDONLY);
+	fo = open(out_filename, O_WRONLY | O_CREAT | O_APPEND, 0777);
 	if (fi < 0 || fo < 0)
 		return AES_ERROR;
-
-	while ((i = read(fi, bufferin, AES_BUFSIZ)) == AES_BUFSIZ)
-	{
-		j++;
-		inv_cipher(bufferin, bufferout, w);
-		if (write(fo, bufferout, AES_BUFSIZ) != AES_BUFSIZ)
+	while ((i = read(fi, bufferin, AES_BUFSIZ)) == AES_BUFSIZ)	{
+		inv_cipher(bufferin, bufferout, lw);
+		j = AES_BUFSIZ;
+		while (j > 0 && bufferout[j-1] == 0)
+			j--;
+		if (write(fo, bufferout, j) != j)
 			return AES_ERROR;
-	}
 
-#if defined(__linux__) || defined(__linux)
-	ftruncate(fo, (j << 4) - bufferout[AES_BUFSIZ - 1]);
-#else
-	chsize(fo, (j << 4) - bufferout[AES_BUFSIZ - 1]);
-#endif
-	free(w);
-	w = NULL;
+		memset(bufferin,0 ,AES_BUFSIZ);
+		memset(bufferout,0 ,AES_BUFSIZ);
+	}
+	close(fi);
+	close(fo);
+
 	return AES_SUCCESS;
 }

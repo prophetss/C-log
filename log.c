@@ -1,31 +1,53 @@
 #include <pthread.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#include <stdio.h>
 #include <time.h>
-#include <string.h>
-#include <stdarg.h>
-#include <sys/stat.h>
+#include <stdio.h>
 #include <stdlib.h>
-#include <signal.h>
-#include <execinfo.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <stdarg.h>
+#include <sys/syscall.h> 
+#include "file_util.h"
+#include "trace.h"
+#include "lz4.h"
 #include "aes.h"
-#include "sha2.h"
 #include "md5.h"
 #include "log.h"
 
-#if (IOBUF_SIZE > MBUF_MAX)
+
+#if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
 #define _setvbuf(a, b, c, d)	setvbuf(a, b ,c, d)
 #else
 #define _setvbuf(a, b, c, d)
-#endif /* IOBUF_SIZE */
+#endif /* LOG_IO_BUF_MAX */
 
 #define atomic_inc(x) __sync_add_and_fetch((x),1)
+
+/*非16整数倍向上扩展*/
+#define aes_expand(n)	(n&0x000F ? (n+0x000F)&0xFFF0 : n)
+
+#define EXPAND_BUF_MAX	aes_expand(LOG_BUF_MAX)
+
+#define _error_display(...)	fprintf(stderr, __VA_ARGS__)
+
+#define _sys_error_display(...) do {			\
+	_error_display(__VA_ARGS__);				\
+	_error_display("%s\n", strerror(errno));	\
+    } while(0)
+
+#define exit_throw(errno, ...)                                            \
+{                                                                         \
+    DEBUGOUTPUT("Error defined at %s, line %i : \n", __FILE__, __LINE__); \
+    DISPLAYLEVEL(1, "Error %i : ", errno);                                \
+    DISPLAYLEVEL(1, __VA_ARGS__);                                         \
+    DISPLAYLEVEL(1, " \n");                                               \
+    exit(error);                                                          \
+}
 
 static pthread_mutex_t mMutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* 日志文件描述符 */
-static FILE* f_log = NULL;
+static FILE *f_log = NULL;
 
 /* 多线程初始化同步 */
 static volatile int _log_sync = 0;
@@ -33,88 +55,36 @@ static volatile int _log_sync = 0;
 /* 初始化标志 */
 static volatile int _is_initialized = 0;
 
-/*IO缓存*/
-static char* iobuf = NULL;
+/* IO缓存 */
+static char *io_buf = NULL;
 
-static int iobuf_size = IOBUF_SIZE;
+/* IO缓存剩余大小（当小于LOG_BUF_MAX时刷新写文件）*/
+static int io_buf_size = LOG_IO_BUF_MAX;
 
-static long long getfilesize()
-{
-	struct stat sbuf;
-	if (stat(RUN_LOG_PATH, &sbuf) != LOG_SUCCESS)
-	{
-		perror("get file size failed!");
-		return LOG_FAILED;
-	}
+/* 加密标志 0-不加密 1-加密 */
+static int cipher_flag = 0;
 
-	return sbuf.st_size;
-}
+/* 密钥 */
+static unsigned char *key = NULL;
 
-static void trace_print(int signal_type)
-{
-	int trace_id = -1;
-	int i = 0;
-	void *buffer[100];
-	char **info = NULL;
-	char trace_buff[TRACE_SIZE];
-
-	trace_id = backtrace(buffer, TRACE_SIZE);
-
-	info = backtrace_symbols(buffer, trace_id);
-	if (NULL == info)
-		return;
-
-	for (i = 0; i < trace_id; i++)
-	{
-		sprintf(trace_buff, "echo \"%s\" >> %s_%d", info[i], TRACE_PRINT_PATH, signal_type);
-		system(trace_buff);
-	}
-
-	sprintf(trace_buff, "echo \"###################################\" >> %s_%d", TRACE_PRINT_PATH, signal_type);
-	system(trace_buff);
-}
-
-static void signal_hadle_fun(int signal_type)
-{
-	trace_print(signal_type);
-	exit(0);
-}
-
-static void trace_init()
-{
-	/* 异常退出信号注册 */
-	signal(SIGHUP, signal_hadle_fun);
-	signal(SIGINT, signal_hadle_fun);
-	signal(SIGQUIT, signal_hadle_fun);
-	signal(SIGILL, signal_hadle_fun);
-	signal(SIGTRAP, signal_hadle_fun);
-	signal(SIGABRT, signal_hadle_fun);
-	signal(SIGBUS, signal_hadle_fun);
-	signal(SIGFPE, signal_hadle_fun);
-	signal(SIGKILL, signal_hadle_fun);
-	signal(SIGSEGV, signal_hadle_fun);
-	signal(SIGPIPE, signal_hadle_fun);
-	signal(SIGTERM, signal_hadle_fun);
-}
+/* 压缩标志 0-不压缩 1-压缩 */
+//static int compress_flag = 0;
 
 static void _log_initialize()
 {
-	if (!_is_initialized)
-	{
-		if (atomic_inc(&_log_sync) == 1)
-		{
+	if (!_is_initialized) {
+		if (atomic_inc(&_log_sync) == 1) {
 			/* 用户IO缓存初始化 */
-#if (IOBUF_SIZE > MBUF_MAX)
-			if (!iobuf)
-				iobuf = (char*)malloc(IOBUF_SIZE);
-#endif
+#		if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
+			if (!io_buf)
+				io_buf = (char*)malloc(LOG_IO_BUF_MAX);
+#		endif
 
 			/* 异常堆栈打印初始化 */
 			trace_init();
 			_is_initialized = 1;
 		}
-		else
-		{
+		else {
 			while (!_is_initialized) sleep(0);
 		}
 	}
@@ -132,10 +102,26 @@ static void _log_unlock(void)
 	pthread_mutex_unlock(&mMutex);
 }
 
+static void cipher_buf(unsigned char *buf, size_t expand_buf_len)
+{
+	unsigned char cipher_buf[AES_BUFSIZ], out[AES_BUFSIZ];
+	int uncipher_io_size = expand_buf_len;
+
+	while (uncipher_io_size > 0) {
+		memcpy(cipher_buf, buf + expand_buf_len - uncipher_io_size, AES_BUFSIZ);
+		if (aes_cipher_data(cipher_buf, AES_BUFSIZ, out, key, AES_128) != AES_SUCCESS) {
+			_error_display("failure to encrypt!");
+			return;
+		}
+		memcpy(buf + expand_buf_len - uncipher_io_size, out, AES_BUFSIZ);
+		uncipher_io_size -= AES_BUFSIZ;
+	}
+}
+
 void run_log(int line_num, ...)
 {
 	va_list args;
-	char buf[MBUF_MAX] = { 0 };
+	unsigned char buf[EXPAND_BUF_MAX] = { 0 };
 	size_t buf_len = 0;
 	size_t mlen = 0;
 
@@ -143,90 +129,124 @@ void run_log(int line_num, ...)
 	char* message = va_arg(args, char*);
 	mlen = strlen(message);
 
-	if (line_num != INVAILD_LINE_NUM)
-	{
+	if (line_num != INVAILD_LINE_NUM) {
+		/* DEBUG 模式信息 */
 		time_t rawtime;
 		struct tm* timeinfo;
 		time(&rawtime);
 		timeinfo = localtime(&rawtime);
 		pid_t tid = syscall(SYS_gettid);
-		sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d %s[%d]%d:", timeinfo->tm_year + 1900,
+		sprintf((char*)buf, "%04d-%02d-%02d %02d:%02d:%02d %s[%d]%d:", timeinfo->tm_year + 1900,
 		        timeinfo->tm_mon + 1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min,
 		        timeinfo->tm_sec, message, line_num, tid);
-		buf_len =  strlen(buf);
+		buf_len =  strlen((char*)buf);
 	}
-	else
-	{
-		strncat(buf, message, mlen);
+	else {
+		strncat((char*)buf, message, mlen);
 		buf_len =  mlen;
 	}
 
-	while (mlen != 0 &&  buf_len < MBUF_MAX - 1)
-	{
+	while (mlen != 0 &&  buf_len < LOG_BUF_MAX - 1) {
 		message = va_arg(args, char*);
 		mlen = strlen(message);
-		strncat(buf, message, mlen);
+		strncat((char*)buf, message, mlen);
 		buf_len += mlen;
 	}
 	va_end(args);
 
 	_log_lock();
 
-	if (NULL == f_log)
-	{
-		if ((f_log = fopen(RUN_LOG_PATH, "a+")) != NULL)
-		{
-			_setvbuf(f_log, iobuf, _IOFBF, IOBUF_SIZE);
+	if (NULL == f_log) {
+		if ((f_log = fopen(LOG_PATH, "a+")) != NULL) {
+			_setvbuf(f_log, io_buf, _IOFBF, LOG_IO_BUF_MAX);
 		}
-		else
-		{
-			perror("file open failed!");
+		else {
+			_sys_error_display("failure to open log!");
 			_log_unlock();
 			return;
 		}
 	}
 
-	int print_size = fprintf(f_log, "%s\n", buf);
-
-	iobuf_size = iobuf_size - print_size;
-	/* IO缓存区已满,刷新 */
-	if (iobuf_size < MBUF_MAX)
-	{
-		fclose(f_log);
-		f_log = NULL;
-		iobuf_size = IOBUF_SIZE;
+	if (NULL != key) {
+		buf_len = aes_expand(buf_len);
+		cipher_buf(buf, buf_len);
 	}
 
-	if (getfilesize() > MAX_FILE_SIZE)
+	int print_size = fwrite(buf, sizeof(unsigned char), buf_len, f_log);
+
+	io_buf_size = io_buf_size - print_size;
+	/* IO缓存区已满,刷新 */
+	if (io_buf_size < LOG_BUF_MAX) {
+		fclose(f_log);
+		f_log = NULL;
+		io_buf_size = LOG_IO_BUF_MAX;
+	}
+
+	if (get_file_size(LOG_PATH) > LOG_FILE_SIZE_MAX)
 	{
-		remove(RUN_LOG_BAK_PATH);
-		rename(RUN_LOG_PATH, RUN_LOG_BAK_PATH);
+		static int bak_num = 0;
+		char path_bak[160];
+		sprintf(path_bak, "%s.bak%d", LOG_PATH, bak_num);
+		compress_file(LOG_PATH, path_bak);
+		remove(LOG_PATH);
+		bak_num++;
 	}
 
 	_log_unlock();
 }
 
-
-void cipher_log(const char *password, const char *in_filepath, const char *out_filepath)
+int set_key(const char *password, int len)
 {
-	if (!password)
-		return;
-	unsigned char digest[SHA256_DIGEST_SIZE];
-	sha256(password, strlen(password), digest);
-	aes_cipher_file(in_filepath, out_filepath, digest, AES_256);
+	_log_lock();
+
+	if (NULL == password) {
+		free(key);
+		key = NULL;
+		return OP_SUCCESS;
+	}
+
+	if (NULL == key)
+		key = (unsigned char*)malloc(MD5_HASHBYTES);
+	if (NULL != key) {
+		MD5Data((unsigned char*)password, len, key);
+	}
+	else {
+		_log_unlock();
+		_sys_error_display("memory allication failed!");
+		return OP_FAILED;
+	}
+
+	aes_set_key(key, len);
+
+	_log_unlock();
+	return OP_SUCCESS;
 }
 
-void decipher_log(const char *password, const char *in_filepath, const char *out_filepath)
+void delete_key()
 {
-	if (!password)
-		return;
-	unsigned char digest[SHA256_DIGEST_SIZE];
-	sha256(password, strlen(password), digest);
-	aes_decipher_file(in_filepath, out_filepath, digest, AES_256);
+	_log_lock();
+
+	if (cipher_flag == 1)
+		cipher_flag = -1;
+
+	_log_unlock();
 }
 
+int decipher_log(const char *password, int pw_len, const char *in_filepath)
+{
+	unsigned char decipher_key[MD5_HASHBYTES];
+	MD5Data((unsigned char*)password, pw_len, decipher_key);
+	rename(in_filepath, (char *)decipher_key);
+	if (AES_SUCCESS != aes_decipher_file((char*)decipher_key, in_filepath , decipher_key, AES_128)) {
+		rename((char*)decipher_key, in_filepath);
+		_error_display("decipher log failed!");
+		return OP_FAILED;
+	}
+	remove((char*)decipher_key);
+	return OP_SUCCESS;
+}
 
-void md5_log(const char* filepath, unsigned char *digest)
+void md5_log(const char *filepath, char *digest)
 {
 	MD5File(filepath, digest);
 }

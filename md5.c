@@ -15,10 +15,12 @@
  * will fill a supplied 16-byte array with the digest.
  */
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <string.h>		/* for memcpy() */
 #include <errno.h>
+#include <unistd.h>
 #include "md5.h"
 
 #if __BYTE_ORDER == 1234
@@ -272,7 +274,7 @@ MD5End(MD5_CTX *ctx, char *buf)
 }
 
 
-void MD5File(const char *filename, unsigned char *digest)
+void MD5File(const char *filename, char *digest)
 {
 	unsigned char buffer[BUFSIZ];
 	MD5_CTX ctx;
@@ -280,22 +282,19 @@ void MD5File(const char *filename, unsigned char *digest)
 
 	MD5Init(&ctx);
 	f = open(filename, O_RDONLY);
-	if (f < 0)
-	{
+	if (f < 0) {
 		perror("open failed!");
 		return;
 	}
 
-	while ((i = read(f, buffer, sizeof buffer)) > 0) 
-	{
+	while ((i = read(f, buffer, sizeof buffer)) > 0) {
 		MD5Update(&ctx, buffer, i);
 	}
 
 	j = errno;
 	close(f);
 	errno = j;
-	if (i < 0)
-	{
+	if (i < 0) {
 		perror("read failed!");
 		return;
 	}
@@ -304,9 +303,9 @@ void MD5File(const char *filename, unsigned char *digest)
 
 void MD5Data(const unsigned char *data, unsigned int len, unsigned char *digest)
 {
-	MD5_CTX ctx;
+    MD5_CTX ctx;
 
-	MD5Init(&ctx);
-	MD5Update(&ctx, data, len);
-	MD5End(&ctx, digest);
+    MD5Init(&ctx);
+    MD5Update(&ctx, data, len);
+    MD5Final(digest, &ctx);
 }
