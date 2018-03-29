@@ -35,14 +35,14 @@
 	_error_display("%s\n", strerror(errno));	\
     } while(0)
 
-#define exit_throw(errno, ...)                                            \
-{                                                                         \
-    DEBUGOUTPUT("Error defined at %s, line %i : \n", __FILE__, __LINE__); \
-    DISPLAYLEVEL(1, "Error %i : ", errno);                                \
-    DISPLAYLEVEL(1, __VA_ARGS__);                                         \
-    DISPLAYLEVEL(1, " \n");                                               \
-    exit(error);                                                          \
-}
+#define exit_throw(errno, ...) do {												\
+{                                                                         		\
+    _error_display("Error defined at %s, line %i : \n", __FILE__, __LINE__); 	\
+    _sys_error_display(1, "Error %i : ", errno);                                \
+    _error_display(__VA_ARGS__);                                        		\
+    _error_display(" \n");                                               		\
+    exit(error);                                                          		\
+} while(0)
 
 static pthread_mutex_t mMutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -61,24 +61,19 @@ static char *io_buf = NULL;
 /* IO缓存剩余大小（当小于LOG_BUF_MAX时刷新写文件）*/
 static int io_buf_size = LOG_IO_BUF_MAX;
 
-/* 加密标志 0-不加密 1-加密 */
-static int cipher_flag = 0;
-
 /* 密钥 */
 static unsigned char *key = NULL;
 
-/* 压缩标志 0-不压缩 1-压缩 */
-//static int compress_flag = 0;
 
 static void _log_initialize()
 {
 	if (!_is_initialized) {
 		if (atomic_inc(&_log_sync) == 1) {
 			/* 用户IO缓存初始化 */
-#		if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
+		#if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
 			if (!io_buf)
 				io_buf = (char*)malloc(LOG_IO_BUF_MAX);
-#		endif
+		#endif
 
 			/* 异常堆栈打印初始化 */
 			trace_init();
@@ -222,31 +217,33 @@ int set_key(const char *password, int len)
 	return OP_SUCCESS;
 }
 
-void delete_key()
-{
-	_log_lock();
-
-	if (cipher_flag == 1)
-		cipher_flag = -1;
-
-	_log_unlock();
-}
-
 int decipher_log(const char *password, int pw_len, const char *in_filepath)
 {
-	unsigned char decipher_key[MD5_HASHBYTES];
-	MD5Data((unsigned char*)password, pw_len, decipher_key);
-	rename(in_filepath, (char *)decipher_key);
-	if (AES_SUCCESS != aes_decipher_file((char*)decipher_key, in_filepath , decipher_key, AES_128)) {
-		rename((char*)decipher_key, in_filepath);
+	set_key(password, pw_len);
+	char tmpname[] = "tmp.XXXXXX";
+	mkstemp(tmpname);
+	rename(in_filepath, tmpname);
+	/*后两个参数暂时没有*/
+	if (AES_SUCCESS != aes_decipher_file(tmpname, in_filepath , 0, AES_128)) {
+		rename(tmpname, in_filepath);
 		_error_display("decipher log failed!");
 		return OP_FAILED;
 	}
-	remove((char*)decipher_key);
+	remove(tmpname);
 	return OP_SUCCESS;
 }
 
-void md5_log(const char *filepath, char *digest)
+void md5_log(const char *filepath, unsigned char *digest)
 {
 	MD5File(filepath, digest);
+}
+
+char* md5_log_s(const char* filepath, char *buf)
+{
+	return MD5File_S(filepath, buf);
+}
+
+int decompress_log(const char *src_filepath, const char *dst_filepath)
+{
+	return decompress_file(src_filepath, dst_filepath);
 }

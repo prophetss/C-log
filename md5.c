@@ -23,6 +23,14 @@
 #include <unistd.h>
 #include "md5.h"
 
+typedef unsigned int    u_int32_t;
+
+typedef struct MD5Context {
+    u_int32_t buf[4];
+    u_int32_t bits[2];
+    unsigned char in[64];
+} MD5_CTX;
+
 #if __BYTE_ORDER == 1234
 #define byteReverse(buf, len)	/* Nothing */
 #else
@@ -253,35 +261,14 @@ void MD5Transform(u_int32_t buf[4], u_int32_t const in[16])
     buf[3] += d;
 }
 
-char *
-MD5End(MD5_CTX *ctx, char *buf)
-{
-	int i;
-	unsigned char digest[MD5_HASHBYTES];
-	static const char hex[] = "0123456789abcdef";
-
-	if (!buf)
-		buf = malloc(33);
-	if (!buf)
-		return 0;
-	MD5Final(digest, ctx);
-	for (i = 0; i<MD5_HASHBYTES; i++) {
-		buf[i + i] = hex[digest[i] >> 4];
-		buf[i + i + 1] = hex[digest[i] & 0x0f];
-	}
-	buf[i + i] = '\0';
-	return buf;
-}
-
-
-void MD5File(const char *filename, char *digest)
+void MD5File(const char *filepath, unsigned char *digest)
 {
 	unsigned char buffer[BUFSIZ];
 	MD5_CTX ctx;
 	int f, i, j;
 
 	MD5Init(&ctx);
-	f = open(filename, O_RDONLY);
+	f = open(filepath, O_RDONLY);
 	if (f < 0) {
 		perror("open failed!");
 		return;
@@ -298,7 +285,30 @@ void MD5File(const char *filename, char *digest)
 		perror("read failed!");
 		return;
 	}
-	MD5End(&ctx, digest);
+
+    MD5Final(digest, &ctx);
+}
+
+char* MD5File_S(const char *filepath, char *buf)
+{
+    int i;
+    unsigned char digest[MD5_HASHBYTES];
+    static const char hex[] = "0123456789abcdef";
+
+    if (NULL == buf) {
+        buf = malloc(2*MD5_HASHBYTES+1);
+    }
+    if (NULL == buf) {
+        perror("md5 memory allication failed!");
+        exit(errno);
+    }
+    MD5File(filepath, digest);
+    for (i = 0; i<MD5_HASHBYTES; i++) {
+        buf[i + i] = hex[digest[i] >> 4];
+        buf[i + i + 1] = hex[digest[i] & 0x0f];
+    }
+    buf[i + i] = '\0';
+    return buf;
 }
 
 void MD5Data(const unsigned char *data, unsigned int len, unsigned char *digest)
