@@ -459,12 +459,7 @@ int aes_set_key(unsigned char *key, int len)
 		lw = NULL;
 	}
 
-	switch (sizeof(key)) {
-		default:
-		case 16: Nk = 4; Nr = 10; break;
-		case 24: Nk = 6; Nr = 12; break;
-		case 32: Nk = 8; Nr = 14; break;
-	}
+	Nk = 4; Nr = 10;
 	
 	lw = malloc(Nb*(Nr+1)*4);
 	if (lw == NULL)

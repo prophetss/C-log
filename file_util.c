@@ -13,7 +13,7 @@
 int get_file_size(const char *fullfilepath)
 {
 	struct stat sbuf;
-	if (stat(fullfilepath, &sbuf) != OP_SUCCESS) {
+	if (stat(fullfilepath, &sbuf) != SUCCESS) {
 		perror("access file attributes failed!");
 		return -1;
 	}
@@ -54,14 +54,14 @@ static int init_compress(const char *src_filepath, const char *dst_filepath, s_r
 	ress->src_file = fopen(src_filepath, "r");
 	if (NULL == ress->src_file) {
 		perror("compress failed to open src_filepath!");
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	ress->dst_file = fopen(dst_filepath, "w+");
 	if (NULL == ress->dst_file)	{
 		perror("compress failed to open dst_filepath!");
 		fclose(ress->src_file);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	ress->src_buf = malloc(LOG_COMPRESS_BUF * sizeof(char));
@@ -79,7 +79,7 @@ static int init_compress(const char *src_filepath, const char *dst_filepath, s_r
 		exit(errno);
 	}
 
-	return OP_SUCCESS;
+	return SUCCESS;
 }
 
 static int init_decompress(const char *src_filepath, const char *dst_filepath, s_res_t *ress)
@@ -87,7 +87,7 @@ static int init_decompress(const char *src_filepath, const char *dst_filepath, s
 	ress->src_file = fopen(src_filepath, "r");
 	if (NULL == ress->src_file) {
 		perror("decompress failed to open src_filepath!");
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	if (fseek(ress->src_file, 0L, SEEK_END) != 0) {
@@ -105,7 +105,7 @@ static int init_decompress(const char *src_filepath, const char *dst_filepath, s
 	if (NULL == ress->dst_file)	{
 		perror("decompress failed to open dst_filepath!");
 		fclose(ress->src_file);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	ress->src_buf = malloc(src_file_size * sizeof(char)+1024);
@@ -122,7 +122,7 @@ static int init_decompress(const char *src_filepath, const char *dst_filepath, s
 	}
 	ress->dst_buf_size = LOG_COMPRESS_BUF;
 
-	return OP_SUCCESS;
+	return SUCCESS;
 }
 
 static void uninit_resources(s_res_t *ress)
@@ -138,15 +138,15 @@ static void uninit_resources(s_res_t *ress)
 int compress_file(const char *src_filepath, const char *dst_filepath)
 {
 	s_res_t compress_res;
-	if (init_compress(src_filepath, dst_filepath, &compress_res) != OP_SUCCESS) {
-		return OP_FAILED;
+	if (init_compress(src_filepath, dst_filepath, &compress_res) != SUCCESS) {
+		return FAILED;
 	}
 
 	int compressed_data_size, read_data_size;
 	if ((read_data_size = fread(compress_res.src_buf, sizeof(char), LOG_COMPRESS_BUF, compress_res.src_file)) == 0) {
 		perror("compress failed to read data!");
 		uninit_resources(&compress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 	compress_res.src_buf_size = read_data_size;
 
@@ -154,32 +154,32 @@ int compress_file(const char *src_filepath, const char *dst_filepath)
 	if (compressed_data_size <= 0) {
 		fprintf(stderr, "%s\n", "compress failed,a negative result from LZ4_compress_default!");
 		uninit_resources(&compress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	if (fwrite(compress_res.dst_buf, sizeof(char), compressed_data_size, compress_res.dst_file) != compressed_data_size) {
 		perror("compress failed to write data!");
 		uninit_resources(&compress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	uninit_resources(&compress_res);
 
-	return OP_SUCCESS;
+	return SUCCESS;
 }
 
 int decompress_file(const char *src_filepath, const char *dst_filepath)
 {
 	s_res_t decompress_res;
-	if (init_decompress(src_filepath, dst_filepath, &decompress_res) != OP_SUCCESS) {
-		return OP_FAILED;
+	if (init_decompress(src_filepath, dst_filepath, &decompress_res) != SUCCESS) {
+		return FAILED;
 	}
 
 	int decompressed_data_size, read_data_size;
 	if ((read_data_size = fread(decompress_res.src_buf, sizeof(char), decompress_res.src_buf_size, decompress_res.src_file)) == 0) {
 		perror("decompress failed to read data!");
 		uninit_resources(&decompress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 	decompress_res.src_buf_size = read_data_size;
 
@@ -187,16 +187,16 @@ int decompress_file(const char *src_filepath, const char *dst_filepath)
 	if (decompressed_data_size <= 0) {
 		fprintf(stderr, "%s\n", "decompress failed,a negative result from LZ4_decompress_safe!");
 		uninit_resources(&decompress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	if (fwrite(decompress_res.dst_buf, sizeof(char), decompressed_data_size, decompress_res.dst_file) != decompressed_data_size) {
 		perror("decompress failed to write data!");
 		uninit_resources(&decompress_res);
-		return OP_FAILED;
+		return FAILED;
 	}
 
 	uninit_resources(&decompress_res);
 
-	return OP_SUCCESS;
+	return SUCCESS;
 }

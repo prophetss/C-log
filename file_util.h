@@ -1,10 +1,8 @@
 #ifndef _FILE_UTIL_H_
 #define _FILE_UTIL_H_
 
-
-#define OP_SUCCESS	   0
-#define OP_FAILED	  -1
-
+#define SUCCESS	0
+#define FAILED	1
 
 /*获取文件大小（不打开文件）*/
 int get_file_size(const char *fullfilepath);

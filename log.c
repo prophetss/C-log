@@ -18,8 +18,9 @@
 #if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
 #define _setvbuf(a, b, c, d)	setvbuf(a, b ,c, d)
 #else
+/*nothing*/
 #define _setvbuf(a, b, c, d)
-#endif /* LOG_IO_BUF_MAX */
+#endif
 
 #define atomic_inc(x) __sync_add_and_fetch((x),1)
 
@@ -30,18 +31,11 @@
 
 #define _error_display(...)	fprintf(stderr, __VA_ARGS__)
 
-#define _sys_error_display(...) do {			\
-	_error_display(__VA_ARGS__);				\
-	_error_display("%s\n", strerror(errno));	\
-    } while(0)
-
-#define exit_throw(errno, ...) do {												\
-{                                                                         		\
+#define _exit_throw(...) do {                                             		\
     _error_display("Error defined at %s, line %i : \n", __FILE__, __LINE__); 	\
-    _sys_error_display(1, "Error %i : ", errno);                                \
-    _error_display(__VA_ARGS__);                                        		\
-    _error_display(" \n");                                               		\
-    exit(error);                                                          		\
+    _error_display("Errno : %d, msg : %s\n", errno, strerror(errno));           \
+    _error_display("%s\n", __VA_ARGS__);                                        \
+    exit(errno);                                                           		\
 } while(0)
 
 static pthread_mutex_t mMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -61,9 +55,8 @@ static char *io_buf = NULL;
 /* IO缓存剩余大小（当小于LOG_BUF_MAX时刷新写文件）*/
 static int io_buf_size = LOG_IO_BUF_MAX;
 
-/* 密钥 */
-static unsigned char *key = NULL;
-
+/* 加密标志 */
+static int is_cipher = 0;
 
 static void _log_initialize()
 {
@@ -104,7 +97,7 @@ static void cipher_buf(unsigned char *buf, size_t expand_buf_len)
 
 	while (uncipher_io_size > 0) {
 		memcpy(cipher_buf, buf + expand_buf_len - uncipher_io_size, AES_BUFSIZ);
-		if (aes_cipher_data(cipher_buf, AES_BUFSIZ, out, key, AES_128) != AES_SUCCESS) {
+		if (aes_cipher_data(cipher_buf, AES_BUFSIZ, out, NULL, AES_128) != AES_SUCCESS) {
 			_error_display("failure to encrypt!");
 			return;
 		}
@@ -125,7 +118,7 @@ void run_log(int line_num, ...)
 	mlen = strlen(message);
 
 	if (line_num != INVAILD_LINE_NUM) {
-		/* DEBUG 模式信息 */
+		/* DEBUG模式信息 */
 		time_t rawtime;
 		struct tm* timeinfo;
 		time(&rawtime);
@@ -152,17 +145,11 @@ void run_log(int line_num, ...)
 	_log_lock();
 
 	if (NULL == f_log) {
-		if ((f_log = fopen(LOG_PATH, "a+")) != NULL) {
-			_setvbuf(f_log, io_buf, _IOFBF, LOG_IO_BUF_MAX);
-		}
-		else {
-			_sys_error_display("failure to open log!");
-			_log_unlock();
-			return;
-		}
+		if ((f_log = fopen(LOG_PATH, "a+")) == NULL) _exit_throw("failure to open log!");
+		_setvbuf(f_log, io_buf, _IOFBF, LOG_IO_BUF_MAX);
 	}
 
-	if (NULL != key) {
+	if (is_cipher) {
 		buf_len = aes_expand(buf_len);
 		cipher_buf(buf, buf_len);
 	}
@@ -190,40 +177,26 @@ void run_log(int line_num, ...)
 	_log_unlock();
 }
 
-int set_key(const char *password, int len)
+LOG_RETURNS set_key(const char *password, int len)
 {
 	_log_lock();
-
-	if (NULL == password) {
-		free(key);
-		key = NULL;
-		return OP_SUCCESS;
-	}
-
-	if (NULL == key)
-		key = (unsigned char*)malloc(MD5_HASHBYTES);
-	if (NULL != key) {
-		MD5Data((unsigned char*)password, len, key);
-	}
-	else {
-		_log_unlock();
-		_sys_error_display("memory allication failed!");
-		return OP_FAILED;
-	}
-
+	unsigned char key[MD5_HASHBYTES];
+	/* 密码先MD5散列128位,然后作为AES-128的密钥 */
+	MD5Data((unsigned char*)password, len, key);
 	aes_set_key(key, len);
-
+	is_cipher = 1;
 	_log_unlock();
 	return OP_SUCCESS;
 }
 
-int decipher_log(const char *password, int pw_len, const char *in_filepath)
+LOG_RETURNS decipher_log(const char *password, int pw_len, const char *in_filepath)
 {
-	set_key(password, pw_len);
+	unsigned char key[MD5_HASHBYTES];
+	MD5Data((unsigned char*)password, pw_len, key);
+	aes_set_key(key, MD5_HASHBYTES);
 	char tmpname[] = "tmp.XXXXXX";
 	mkstemp(tmpname);
 	rename(in_filepath, tmpname);
-	/*后两个参数暂时没有*/
 	if (AES_SUCCESS != aes_decipher_file(tmpname, in_filepath , 0, AES_128)) {
 		rename(tmpname, in_filepath);
 		_error_display("decipher log failed!");

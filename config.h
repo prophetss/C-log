@@ -20,7 +20,7 @@
 #define LOG_BAK_MAX			10   			 
 
 /*日志打印IO缓存大小，不需要时设置为0*/
-#define LOG_IO_BUF_MAX		1024		 	 
+#define LOG_IO_BUF_MAX		0		 	 
 
 /*堆栈打印文件输出路径*/
 #define TRACE_PRINT_PATH	"trace_info"	 
