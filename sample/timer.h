@@ -2,18 +2,6 @@
 #define _PRO_TIME_H_
 
 
-/* 获取运行时钟周期,比clock()快至少一个数量级，除以主频
-** 等于时间秒，调用需要引<linux/types.h>此文件 */
-#define rdtsc(x)	\
-{	\
-	__u32 lo, hi;	\
-	__asm__ __volatile__	\
-	(	\
-	    "rdtsc":"=a"(lo), "=d"(hi)	\
-	);	\
-	x = (__u64)hi << 32 | lo;	\
-}
-
 /* 多线程加锁，单线程可以去掉此宏节省资源 */
 #define MULTITHREAD
 

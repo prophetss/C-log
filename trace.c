@@ -2,8 +2,15 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <execinfo.h>
-#include "config.h"
 #include "trace.h"
+#include "log.h"
+
+
+static struct handle_node
+{
+	log_t *log_handle;
+	struct handle_node *next;
+} *lhs_head = NULL, *lhs_tail = NULL;
 
 static void trace_print(int signal_type)
 {
@@ -11,9 +18,9 @@ static void trace_print(int signal_type)
 	int i = 0;
 	void *buffer[100];
 	char **info = NULL;
-	char trace_buff[TRACE_BUF_MAX];
+	char trace_buff[1024];
 
-	trace_id = backtrace(buffer, TRACE_BUF_MAX);
+	trace_id = backtrace(buffer, 1024);
 
 	info = backtrace_symbols(buffer, trace_id);
 	if (NULL == info)
@@ -35,8 +42,57 @@ static void signal_hadle_fun(int signal_type)
 	exit(0);
 }
 
-void trace_init()
+static void add_handle(log_t **lh)
 {
+	handle_node_t *hnd = (handle_node_t*)calloc(sizeof(handle_node_t));
+	if (!hnd) perror("Failed to add a log handle!");
+
+	hnd->log_handle = *lh;
+
+	if (!lhs_head) {
+		lhs_head = hnd;
+		lhs_tail = hnd;
+	}
+	else {
+		lhs_tail->next = hnd;
+		lhs_tail = hnd;
+	}
+	return;
+}
+
+static void delete_handle(log_t **lh)
+{
+	if (!lhs_head) return;
+
+	if (!lhs_head->next && lh_head->log_handle == *lh) {
+		free(lhs->head);
+		lhs_head = NULL;
+		lhs_tail = NULL;
+		return;
+	}
+
+	handle_node_t *pre = lhs_head, *t = pre->next;
+
+	while (t) {
+		if (t->log_handle == *lh) {
+			free(t);
+			pre->next = t->next;
+			if (!pre->next) {
+				lhs_tail = NULL;
+			}
+			return;
+		}
+		pre = pre->next;
+		t = t->next;
+	}
+	return;
+}
+
+void trace_init(log_t **lh)
+{
+	/* 注册日志handle */
+	add_handle(lh);
+
 	/* 异常退出信号注册 */
 	signal(SIGHUP, signal_hadle_fun);
 	signal(SIGINT, signal_hadle_fun);
@@ -51,3 +107,27 @@ void trace_init()
 	signal(SIGPIPE, signal_hadle_fun);
 	signal(SIGTERM, signal_hadle_fun);
 }
+
+
+void trace_uninit(log_t **lh)
+{
+	/* 删除日志handle */
+	delete_handle(lh);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -5,14 +5,8 @@
  *
  * Based on the document FIPS PUB 197
  */
-#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
-#include <sys/stat.h>
-#include "aes.h"
 
 /*
  * Addition in GF(2^8)
@@ -77,10 +71,6 @@ void coef_mult(uint8_t *a, uint8_t *b, uint8_t *d) {
 	d[3] = gmult(a[3],b[0])^gmult(a[2],b[1])^gmult(a[1],b[2])^gmult(a[0],b[3]);
 }
 
-/*
- * The cipher Key.	
- */
-int K;
 
 /*
  * Number of columns (32-bit words) comprising the State. For this 
@@ -387,9 +377,11 @@ void key_expansion(uint8_t *key, uint8_t *w) {
 	}
 }
 
+/*int Nb=4, for  compile error*/
+#define NB_T	4
 void cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
-	uint8_t state[4*Nb];
+	uint8_t state[4* NB_T];
 	uint8_t r, i, j;
 
 	for (i = 0; i < 4; i++) {
@@ -420,7 +412,7 @@ void cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
 void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 
-	uint8_t state[4*Nb];
+	uint8_t state[4* NB_T];
 	uint8_t r, i, j;
 
 	for (i = 0; i < 4; i++) {
@@ -449,55 +441,20 @@ void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w) {
 	}
 }
 
-uint8_t *lw = NULL; // expanded key
-
-/* 密钥初始化 */
-int aes_set_key(unsigned char *key, int len)
+/* init key */
+int aes_init(uint8_t *key, size_t key_len, uint8_t **w)
 {
-	if (lw != NULL) {
-		free(lw);
-		lw = NULL;
+	switch (key_len) {
+	default:
+	case 16: Nk = 4; Nr = 10; break;
+	case 24: Nk = 6; Nr = 12; break;
+	case 32: Nk = 8; Nr = 14; break;
 	}
 
-	Nk = 4; Nr = 10;
+	*w = malloc(Nb*(Nr + 1) * 4);
+	if (*w == NULL) return 1;
 	
-	lw = malloc(Nb*(Nr+1)*4);
-	if (lw == NULL)
-		return AES_ERROR;
+	key_expansion(key, *w);
 
-	key_expansion(key, lw);
-	return AES_SUCCESS;
-}
-
-int aes_cipher_data(uint8_t *in, size_t in_len, uint8_t *out, uint8_t *key, size_t key_len)
-{
-	cipher(in , out , lw);
-	return AES_SUCCESS;
-}
-
-
-int aes_decipher_file(const char *in_filename, const char *out_filename, uint8_t *key, size_t key_len)
-{
-	uint8_t bufferin[AES_BUFSIZ], bufferout[AES_BUFSIZ];
-
-	int fi, fo, i, j;
-	fi = open(in_filename, O_RDONLY);
-	fo = open(out_filename, O_WRONLY | O_CREAT | O_APPEND, 0777);
-	if (fi < 0 || fo < 0)
-		return AES_ERROR;
-	while ((i = read(fi, bufferin, AES_BUFSIZ)) == AES_BUFSIZ)	{
-		inv_cipher(bufferin, bufferout, lw);
-		j = AES_BUFSIZ;
-		while (j > 0 && bufferout[j-1] == 0)
-			j--;
-		if (write(fo, bufferout, j) != j)
-			return AES_ERROR;
-
-		memset(bufferin,0 ,AES_BUFSIZ);
-		memset(bufferout,0 ,AES_BUFSIZ);
-	}
-	close(fi);
-	close(fo);
-
-	return AES_SUCCESS;
+	return 0;
 }

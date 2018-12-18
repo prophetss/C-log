@@ -1,222 +1,376 @@
-#include <pthread.h>
-#include <time.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <errno.h>
+#include <sys/syscall.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdarg.h>
-#include <sys/syscall.h> 
-#include "file_util.h"
-#include "trace.h"
-#include "lz4.h"
-#include "aes.h"
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <errno.h>
+#include <assert.h>
+#include <fcntl.h>
+#include <time.h>
 #include "md5.h"
+#include "lz4_file.h"
 #include "log.h"
 
 
-#if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
-#define _setvbuf(a, b, c, d)	setvbuf(a, b ,c, d)
-#else
-/*nothing*/
-#define _setvbuf(a, b, c, d)
+
+#if !defined(S_ISREG)
+#  define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
 #endif
 
-#define atomic_inc(x) __sync_add_and_fetch((x),1)
+#define AES_128 	16
 
-/*非16整数倍向上扩展*/
-#define aes_expand(n)	(n&0x000F ? (n+0x000F)&0xFFF0 : n)
+#define aes_ex(n)	((n)%AES_128 != 0 ? ((n)/AES_128+1)*AES_128 : (n))
 
-#define EXPAND_BUF_MAX	aes_expand(LOG_BUF_MAX)
+#define EX_SINGLE_LOG_SIZE aes_ex(SINGLE_LOG_SIZE)	//must be sized as a multiple of 16 bytes for aes
 
-#define _error_display(...)	fprintf(stderr, __VA_ARGS__)
+extern void trace_init(log_t **lh);
 
-#define _exit_throw(...) do {                                             		\
-    _error_display("Error defined at %s, line %i : \n", __FILE__, __LINE__); 	\
-    _error_display("Errno : %d, msg : %s\n", errno, strerror(errno));           \
-    _error_display("%s\n", __VA_ARGS__);                                        \
-    exit(errno);                                                           		\
-} while(0)
+extern void trace_uninit(log_t **lh);
 
-static pthread_mutex_t mMutex = PTHREAD_MUTEX_INITIALIZER;
+extern int aes_init(uint8_t *key, size_t key_len, uint8_t **w);
 
-/* 日志文件描述符 */
-static FILE *f_log = NULL;
+extern void cipher(uint8_t *in, uint8_t *out, uint8_t *w);
 
-/* 多线程初始化同步 */
-static volatile int _log_sync = 0;
+extern void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w);
 
-/* 初始化标志 */
-static volatile int _is_initialized = 0;
+static void _update_file(log_t *lh);
 
-/* IO缓存 */
-static char *io_buf = NULL;
-
-/* IO缓存剩余大小（当小于LOG_BUF_MAX时刷新写文件）*/
-static int io_buf_size = LOG_IO_BUF_MAX;
-
-/* 加密标志 */
-static int is_cipher = 0;
-
-static void _log_initialize()
+static uint64_t _get_file_size(const char *fullfilepath)
 {
-	if (!_is_initialized) {
-		if (atomic_inc(&_log_sync) == 1) {
-			/* 用户IO缓存初始化 */
-		#if (LOG_IO_BUF_MAX > LOG_BUF_MAX)
-			if (!io_buf)
-				io_buf = (char*)malloc(LOG_IO_BUF_MAX);
-		#endif
+	int ret;
+	struct stat sbuf;
+	ret = stat(fullfilepath, &sbuf);
+	if (ret || !S_ISREG(sbuf.st_mode)) return 0;
+    return (uint64_t)sbuf.st_size;
+}
 
-			/* 异常堆栈打印初始化 */
-			trace_init();
-			_is_initialized = 1;
-		}
-		else {
-			while (!_is_initialized) sleep(0);
-		}
+static void _log_lock(log_t *l)
+{
+	pthread_mutex_lock(&l->mutex);
+}
+
+static void _log_unlock(log_t *l)
+{
+	pthread_mutex_unlock(&l->mutex);
+}
+
+static int _pwd_init(uint8_t **wkey, const char *pwd)
+{
+	uint8_t key[AES_128];
+	MD5Data((uint8_t*)pwd, strlen(pwd), key);
+	if ( 0 != aes_init(key, AES_128, wkey)) return 1;
+	return 0;
+}
+
+static int _iobuf_init(log_t *lh, size_t io_ms, int flag, const char *pwd)
+{
+	lh->io_cap = io_ms;
+	
+	if (flag & ENCRYPT) {
+		assert(pwd != NULL);
+		if (0 != _pwd_init(&lh->wkey, pwd)) return 1;
 	}
-}
 
-static void _log_lock(void)
-{
-	_log_initialize();
-
-	pthread_mutex_lock(&mMutex);
-}
-
-static void _log_unlock(void)
-{
-	pthread_mutex_unlock(&mMutex);
-}
-
-static void cipher_buf(unsigned char *buf, size_t expand_buf_len)
-{
-	unsigned char cipher_buf[AES_BUFSIZ], out[AES_BUFSIZ];
-	int uncipher_io_size = expand_buf_len;
-
-	while (uncipher_io_size > 0) {
-		memcpy(cipher_buf, buf + expand_buf_len - uncipher_io_size, AES_BUFSIZ);
-		if (aes_cipher_data(cipher_buf, AES_BUFSIZ, out, NULL, AES_128) != AES_SUCCESS) {
-			_error_display("failure to encrypt!");
-			return;
-		}
-		memcpy(buf + expand_buf_len - uncipher_io_size, out, AES_BUFSIZ);
-		uncipher_io_size -= AES_BUFSIZ;
+	lh->io_buf = calloc(1, lh->io_cap);
+	
+	if (!lh->io_buf) {
+		if (!lh->wkey) free(lh->wkey);
+		return 1;
 	}
+	
+	return 0;
 }
 
-void run_log(int line_num, ...)
+static int _file_init(log_t *lh, const char *lp, size_t ms, size_t mb)
 {
-	va_list args;
-	unsigned char buf[EXPAND_BUF_MAX] = { 0 };
-	size_t buf_len = 0;
-	size_t mlen = 0;
+	lh->max_file_size = ms;
+	lh->file_path = strdup(lp);
+	if (!lh->file_path) return 1;
+	lh->cur_file_size = _get_file_size(lp);
+	lh->cur_bak_num = 0;
+	lh->max_bak_num = mb;
+	return 0;
+}
 
-	va_start(args, line_num);
-	char* message = va_arg(args, char*);
-	mlen = strlen(message);
 
-	if (line_num != INVAILD_LINE_NUM) {
-		/* DEBUG模式信息 */
-		time_t rawtime;
-		struct tm* timeinfo;
-		time(&rawtime);
-		timeinfo = localtime(&rawtime);
-		pid_t tid = syscall(SYS_gettid);
-		sprintf((char*)buf, "%04d-%02d-%02d %02d:%02d:%02d %s[%d]%d:", timeinfo->tm_year + 1900,
-		        timeinfo->tm_mon + 1, timeinfo->tm_mday, timeinfo->tm_hour, timeinfo->tm_min,
-		        timeinfo->tm_sec, message, line_num, tid);
-		buf_len =  strlen((char*)buf);
+log_t* log_create(const char *log_file_path, size_t max_file_size, size_t max_file_bak, size_t max_iobuf_size, int cflag, const char *password)
+{
+	assert(log_file_path);
+
+	log_t *l = calloc(1, S_LOG_SIZE);
+	if (!l) return NULL;
+
+	int ret;
+	ret =  _iobuf_init(l, max_iobuf_size, cflag, password);
+	if (ret != 0) {
+		free(l);
+		return NULL;
+	}
+	
+	ret = _file_init(l, log_file_path, max_file_size, max_file_bak);
+	if(ret != 0) {
+		free(l->io_buf);
+		free(l);
+		return NULL;
+	}
+
+	ret = pthread_mutex_init(&l->mutex, NULL);
+	if (ret != 0) {
+		free(l->io_buf);
+		free(l->file_path);
+		free(l);
+		return NULL;
+	}
+
+	l->cflag = cflag;
+	
+	return l;
+}
+
+static void _lock_uninit(log_t *l)
+{
+	pthread_mutex_destroy(&l->mutex);
+}
+
+void log_destory(log_t *lh)
+{
+	if (lh == NULL) return;
+
+	_log_lock(lh);
+
+	_update_file(lh);
+
+	free(lh->io_buf);
+
+	free(lh->wkey);
+
+	_log_unlock(lh);
+
+	_lock_uninit(lh);
+
+	free(lh);
+}
+
+static size_t _real_len(const char * s)
+{
+	for (int i =0; i < AES_128; i++)
+		if (!s[i]) return i;
+	return AES_128;
+}
+
+static int _file_decipher(const char *in_filepath, size_t in_filesize, const char *out_filepath, uint8_t *w)
+{
+	FILE *fi, *fo;
+	
+	fi = fopen(in_filepath, "r");
+	if (fi == NULL) {
+		perror("Failed to open the in file!");
+		return 1;
+	}
+	
+	fo = fopen(out_filepath, "a+");
+	if (fo == NULL) {
+		fclose(fi);
+		perror("Failed to open the out file!");
+		return 1;
+	}
+
+	while (in_filesize > 0) {
+		char outbuf[AES_128];
+		if (fread(outbuf, sizeof(char), AES_128, fi) != AES_128) break;
+		inv_cipher((uint8_t*)outbuf, (uint8_t*)outbuf, w);
+		//cut off the end of zeros
+		const size_t len = _real_len(outbuf);
+		if (fwrite(outbuf, sizeof(char), len, fo) != len) break;
+		in_filesize -= AES_128;
+	}
+
+	fclose(fi);
+	fclose(fo);
+
+	if (in_filesize > 0) return 1;
+	
+	return 0;
+}
+
+int log_decipher(const char *in_filename, const char *out_filename, const char *password)
+{
+	assert(in_filename != NULL);
+	assert(out_filename != NULL);
+	assert(password != NULL);
+	
+	uint8_t *w = NULL;
+	if (0 != _pwd_init(&w, password)) return 1;
+	uint64_t file_size = _get_file_size(in_filename);
+	if (file_size == 0 || file_size % AES_128 != 0) {
+		fprintf(stderr, "Input file error!\n");
+		free(w);
+		return 1;
+	}
+
+	int ret = _file_decipher(in_filename, file_size, out_filename, w);
+
+	free(w);
+
+	if (ret != 0) return ret;
+	
+	return 0;
+}
+
+static void  _file_compress(const char *src_filename, const char *dst_filename)
+{
+	lz4_file_compress(src_filename, dst_filename);
+}
+
+static void _backup_file(log_t *lh)
+{
+	char new_filename[PATH_MAX] = {0};
+	
+	if (lh->cflag & COMPRESS) {	//compress
+		sprintf(new_filename, "%s.bak%lu.lz4", lh->file_path, lh->cur_bak_num % lh->max_bak_num);
+		_file_compress(lh->file_path, new_filename);
+		remove(lh->file_path);
 	}
 	else {
-		strncat((char*)buf, message, mlen);
-		buf_len =  mlen;
+		sprintf(new_filename, "%s.bak%lu", lh->file_path, lh->cur_bak_num % lh->max_bak_num);
+		rename(lh->file_path, new_filename);
+	}
+}
+
+static void _update_file(log_t *lh)
+{
+	if (!lh->f_log) return;
+	
+	fclose(lh->f_log);
+	lh->f_log = NULL;
+	if (lh->max_bak_num == 0) {	//without backup
+		remove(lh->file_path);
+	}
+	else {
+		_backup_file(lh);
+	}
+	lh->cur_bak_num++;
+	lh->cur_file_size = 0;
+}
+
+void log_flush(log_t *lh)
+{
+	assert(lh != NULL);
+	
+	_log_lock(lh);
+
+	_update_file(lh);
+
+	_log_unlock(lh);
+}
+
+
+static int _file_handle_request(log_t *lh)
+{
+	if (lh->f_log) return 0;
+
+	lh->f_log = fopen(lh->file_path, "a+");
+
+	if (!lh->f_log) return 1;
+
+	if (setvbuf(lh->f_log, lh->io_buf, _IOFBF, lh->io_cap) != 0) return 1;
+	
+	return 0;
+}
+
+void _buf_encrypt(char *msg, uint8_t *wkey, size_t len)
+{
+	uint8_t out[AES_128];
+	size_t i = 0;
+	while(len > i) {
+		cipher((uint8_t*)msg + i, out, wkey);
+		memcpy(msg+i, out, AES_128);
+		i+= AES_128;
+	}
+}
+
+static void _write_buf(log_t *lh, char *msg, size_t len)
+{
+	if (lh->cflag & ENCRYPT) {
+		len = aes_ex(len);
+		_buf_encrypt(msg, lh->wkey, len);
 	}
 
-	while (mlen != 0 &&  buf_len < LOG_BUF_MAX - 1) {
-		message = va_arg(args, char*);
-		mlen = strlen(message);
-		strncat((char*)buf, message, mlen);
-		buf_len += mlen;
+	_log_lock(lh);
+
+	if (0 != _file_handle_request(lh)) {
+		fprintf(stderr, "Failed to open the file, path: %s\n", lh->file_path);
+		return;
 	}
+
+	size_t print_size = fwrite(msg, sizeof(char), len, lh->f_log);
+	if (print_size != len) {
+		fprintf(stderr, "Failed to write the file path(%s), msg(%s)\n", lh->file_path, msg);
+		return;
+	}
+	lh->cur_file_size += print_size;
+	
+	if (lh->cur_file_size > lh->max_file_size) {
+		_update_file(lh);
+	}
+
+	_log_unlock(lh);
+	
+}
+
+
+void _log_write(log_t *lh, const log_level_t level, const char *format, ...)
+{
+	assert(lh != NULL);
+	assert(format != NULL);
+
+	char log_msg[EX_SINGLE_LOG_SIZE];
+	memset(log_msg, 0, EX_SINGLE_LOG_SIZE);
+
+	va_list args;
+	va_start(args, format);
+
+	static const char* const severity[] = {"[DEBUG]", "[INFO]", "[WARN]", "[ERROR]"};
+
+/* debug message */
+#if (LOG_LEVEL == LOG_DEBUG)
+	time_t rawtime = time(NULL);
+	struct tm timeinfo;
+	localtime_r(&rawtime, &timeinfo);
+	pid_t tid = syscall(SYS_gettid);
+	int info_len = snprintf(log_msg, SINGLE_LOG_SIZE, "%s%04d-%02d-%02d %02d:%02d:%02d %s<%s> %d: ", severity[level], timeinfo.tm_year + 1900,
+						timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, va_arg(args, char*), va_arg(args, char*), tid);
+#else
+	int info_len = strlen(severity[level]);
+	strncpy(log_msg, severity[level], info_len);
+#endif
+
+	int total_len = vsnprintf(log_msg + info_len, SINGLE_LOG_SIZE - info_len, format, args);
 	va_end(args);
-
-	_log_lock();
-
-	if (NULL == f_log) {
-		if ((f_log = fopen(LOG_PATH, "a+")) == NULL) _exit_throw("failure to open log!");
-		_setvbuf(f_log, io_buf, _IOFBF, LOG_IO_BUF_MAX);
+	
+	if (total_len <= 0 || info_len <= 0 || total_len > SINGLE_LOG_SIZE - info_len) {
+		fprintf(stderr, "Failed to vsnprintf a text entry: (total_len) %d\n", total_len);
+		return;
 	}
-
-	if (is_cipher) {
-		buf_len = aes_expand(buf_len);
-		cipher_buf(buf, buf_len);
-	}
-
-	int print_size = fwrite(buf, sizeof(unsigned char), buf_len, f_log);
-
-	io_buf_size = io_buf_size - print_size;
-	/* IO缓存区已满,刷新 */
-	if (io_buf_size < LOG_BUF_MAX) {
-		fclose(f_log);
-		f_log = NULL;
-		io_buf_size = LOG_IO_BUF_MAX;
-	}
-
-	if (get_file_size(LOG_PATH) > LOG_FILE_SIZE_MAX)
-	{
-		static int bak_num = 0;
-		char path_bak[160];
-		sprintf(path_bak, "%s.bak%d", LOG_PATH, bak_num);
-		compress_file(LOG_PATH, path_bak);
-		remove(LOG_PATH);
-		bak_num++;
-	}
-
-	_log_unlock();
+	
+	total_len += info_len;
+	
+	_write_buf(lh, log_msg, total_len);
 }
 
-LOG_RETURNS set_key(const char *password, int len)
+char* log_md5(const char *filename, char *digest)
 {
-	_log_lock();
-	unsigned char key[MD5_HASHBYTES];
-	/* 密码先MD5散列128位,然后作为AES-128的密钥 */
-	MD5Data((unsigned char*)password, len, key);
-	aes_set_key(key, len);
-	is_cipher = 1;
-	_log_unlock();
-	return OP_SUCCESS;
+	assert(filename != NULL);
+	return MD5File_S(filename, digest);
 }
 
-LOG_RETURNS decipher_log(const char *password, int pw_len, const char *in_filepath)
+int log_uncompress(const char *src_filename, const char *dst_filename)
 {
-	unsigned char key[MD5_HASHBYTES];
-	MD5Data((unsigned char*)password, pw_len, key);
-	aes_set_key(key, MD5_HASHBYTES);
-	char tmpname[] = "tmp.XXXXXX";
-	mkstemp(tmpname);
-	rename(in_filepath, tmpname);
-	if (AES_SUCCESS != aes_decipher_file(tmpname, in_filepath , 0, AES_128)) {
-		rename(tmpname, in_filepath);
-		_error_display("decipher log failed!");
-		return OP_FAILED;
-	}
-	remove(tmpname);
-	return OP_SUCCESS;
+	assert(src_filename != NULL);
+	assert(dst_filename != NULL);
+ 	return lz4_file_uncompress(src_filename, dst_filename);
 }
 
-void md5_log(const char *filepath, unsigned char *digest)
-{
-	MD5File(filepath, digest);
-}
-
-char* md5_log_s(const char* filepath, char *buf)
-{
-	return MD5File_S(filepath, buf);
-}
-
-int decompress_log(const char *src_filepath, const char *dst_filepath)
-{
-	return decompress_file(src_filepath, dst_filepath);
-}
