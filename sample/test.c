@@ -24,6 +24,9 @@
 #define PRINT_TIMES		10000
 
 
+#define UNUSED_RETURN(x)	(void)((x)+1)
+
+
 void test_write(void* arg)
 {
 	int t = *(int*)arg;
@@ -56,7 +59,7 @@ void restore_file(char *fn)
 	sprintf(nfn, "%s.ori", fn);	// raw result
 	
 	char tmpname[] = "tmp.XXXXXX"; // for uncompress
-	(void)mkstemp(tmpname);
+	UNUSED_RETURN(mkstemp(tmpname));
 
 	char *tfn = fn;
 	

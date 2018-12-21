@@ -34,8 +34,11 @@
 /* log level */
 #define LOG_LEVEL			LOG_DEBUG
 
-/* max size(byte) of every log*/
+/* the maximum size(byte) of a logging*/
 #define SINGLE_LOG_SIZE		1024
+
+/* can create the maximum amount of logger handles*/
+#define MAX_HANDLE_NUM		64
 
 /* trace printed path for exit signal */
 #define TRACE_PRINT_PATH	"trace_info"

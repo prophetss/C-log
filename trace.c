@@ -1,16 +1,19 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <execinfo.h>
-#include "trace.h"
 #include "log.h"
 
 
-static struct handle_node
-{
-	log_t *log_handle;
-	struct handle_node *next;
-} *lhs_head = NULL, *lhs_tail = NULL;
+#define UNUSED_RETURN(x)	(void)((x)+1)
+
+static log_t* lhs[MAX_HANDLE_NUM];
+
+
+static volatile int _is_initialized = 0;
+
+
+static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 
 static void trace_print(int signal_type)
 {
@@ -28,72 +31,32 @@ static void trace_print(int signal_type)
 
 	for (i = 0; i < trace_id; i++) {
 		sprintf(trace_buff, "echo \"%s\" >> %s_%d", info[i], TRACE_PRINT_PATH, signal_type);
-		if(system(trace_buff));
+		UNUSED_RETURN(system(trace_buff));
 	}
 
 	sprintf(trace_buff, "echo \"###################################\" >> %s_%d", TRACE_PRINT_PATH, signal_type);
-	if(system(trace_buff));
+	UNUSED_RETURN(system(trace_buff));
 }
 
 static void signal_hadle_fun(int signal_type)
 {
-	trace_print(signal_type);
 	fprintf(stderr, "receive a exit signal!\n");
+	pthread_mutex_lock(&g_mutex);
+	for (int i =0; i < MAX_HANDLE_NUM; i++) {
+		if (lhs[i] != NULL) {
+			log_flush(lhs[i]);
+		}
+	}
+	pthread_mutex_unlock(&g_mutex);
+	fprintf(stderr, "all logger handles flush!\n");
+	trace_print(signal_type);
 	exit(0);
 }
 
-static void add_handle(log_t **lh)
+static void trace_init()
 {
-	handle_node_t *hnd = (handle_node_t*)calloc(sizeof(handle_node_t));
-	if (!hnd) perror("Failed to add a log handle!");
-
-	hnd->log_handle = *lh;
-
-	if (!lhs_head) {
-		lhs_head = hnd;
-		lhs_tail = hnd;
-	}
-	else {
-		lhs_tail->next = hnd;
-		lhs_tail = hnd;
-	}
-	return;
-}
-
-static void delete_handle(log_t **lh)
-{
-	if (!lhs_head) return;
-
-	if (!lhs_head->next && lh_head->log_handle == *lh) {
-		free(lhs->head);
-		lhs_head = NULL;
-		lhs_tail = NULL;
-		return;
-	}
-
-	handle_node_t *pre = lhs_head, *t = pre->next;
-
-	while (t) {
-		if (t->log_handle == *lh) {
-			free(t);
-			pre->next = t->next;
-			if (!pre->next) {
-				lhs_tail = NULL;
-			}
-			return;
-		}
-		pre = pre->next;
-		t = t->next;
-	}
-	return;
-}
-
-void trace_init(log_t **lh)
-{
-	/* 注册日志handle */
-	add_handle(lh);
-
-	/* 异常退出信号注册 */
+	if (_is_initialized) return;
+	
 	signal(SIGHUP, signal_hadle_fun);
 	signal(SIGINT, signal_hadle_fun);
 	signal(SIGQUIT, signal_hadle_fun);
@@ -106,28 +69,38 @@ void trace_init(log_t **lh)
 	signal(SIGSEGV, signal_hadle_fun);
 	signal(SIGPIPE, signal_hadle_fun);
 	signal(SIGTERM, signal_hadle_fun);
+	_is_initialized = 1;
 }
 
-
-void trace_uninit(log_t **lh)
+void add_handle(log_t **l)
 {
-	/* 删除日志handle */
-	delete_handle(lh);
+	pthread_mutex_lock(&g_mutex);
+	trace_init();
+	int i;
+	for (i = 0; i < MAX_HANDLE_NUM; i++) {
+		if (lhs[i] == NULL) {
+			lhs[i] = *l;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_mutex);
+	if (i == MAX_HANDLE_NUM) {
+		fprintf(stderr, "ERROR: a limit on the number of logger handles, it may cause loss of io buffer logging data(process terminated abnormally)!\n");
+	}
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+void remove_handle(log_t **l)
+{
+	pthread_mutex_lock(&g_mutex);
+	int i;
+	for (i = 0; i < MAX_HANDLE_NUM; i++) {
+		if (lhs[i] == *l) {
+			lhs[i] = NULL;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&g_mutex);
+	if (i == MAX_HANDLE_NUM) {
+		fprintf(stderr, "Error: not found the logger handle!\n");
+	}
+}

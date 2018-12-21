@@ -1,4 +1,4 @@
-SRC = cipher/aes.c cipher/md5.c compress/lz4_file.c compress/lz4.c log.h log.c sample/timer.c sample/test.c
+SRC = cipher/aes.c cipher/md5.c compress/lz4_file.c compress/lz4.c trace.c log.h log.c sample/timer.c sample/test.c
 DEBUG =	-O0 -Wall -Wextra -ggdb
 
 all: $(SRC)

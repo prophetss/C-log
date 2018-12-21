@@ -299,7 +299,7 @@ char* MD5File_S(const char *filepath, char *buf)
         buf = malloc(2*MD5_HASHBYTES+1);
     }
     if (NULL == buf) {
-        perror("md5 memory allication failed!");
+        perror("md5 memory allcation failed!");
         exit(errno);
     }
     MD5File(filepath, digest);

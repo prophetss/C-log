@@ -15,20 +15,15 @@
 #include "log.h"
 
 
-
-#if !defined(S_ISREG)
-#  define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
-#endif
-
 #define AES_128 	16
 
 #define aes_ex(n)	((n)%AES_128 != 0 ? ((n)/AES_128+1)*AES_128 : (n))
 
 #define EX_SINGLE_LOG_SIZE aes_ex(SINGLE_LOG_SIZE)	//must be sized as a multiple of 16 bytes for aes
 
-extern void trace_init(log_t **lh);
+extern void add_handle(log_t **l);
 
-extern void trace_uninit(log_t **lh);
+extern void remove_handle(log_t **l);
 
 extern int aes_init(uint8_t *key, size_t key_len, uint8_t **w);
 
@@ -37,6 +32,10 @@ extern void cipher(uint8_t *in, uint8_t *out, uint8_t *w);
 extern void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w);
 
 static void _update_file(log_t *lh);
+
+#if !defined(S_ISREG)
+#  define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
+#endif
 
 static uint64_t _get_file_size(const char *fullfilepath)
 {
@@ -59,26 +58,25 @@ static void _log_unlock(log_t *l)
 
 static int _pwd_init(uint8_t **wkey, const char *pwd)
 {
-	uint8_t key[AES_128];
+	uint8_t key[MD5_HASHBYTES];		//MD5_HASHBYTES==AES_128==16byte
 	MD5Data((uint8_t*)pwd, strlen(pwd), key);
-	if ( 0 != aes_init(key, AES_128, wkey)) return 1;
-	return 0;
+	return aes_init(key, AES_128, wkey);
 }
 
 static int _iobuf_init(log_t *lh, size_t io_ms, int flag, const char *pwd)
 {
 	lh->io_cap = io_ms;
-	
-	if (flag & ENCRYPT) {
-		assert(pwd != NULL);
-		if (0 != _pwd_init(&lh->wkey, pwd)) return 1;
-	}
 
 	lh->io_buf = calloc(1, lh->io_cap);
 	
-	if (!lh->io_buf) {
-		if (!lh->wkey) free(lh->wkey);
-		return 1;
+	if (!lh->io_buf) return 1;
+
+	if (flag & ENCRYPT) {
+		assert(pwd != NULL);
+		if (0 != _pwd_init(&lh->wkey, pwd)) {
+			free(lh->io_buf);
+			return 1;
+		}
 	}
 	
 	return 0;
@@ -103,27 +101,25 @@ log_t* log_create(const char *log_file_path, size_t max_file_size, size_t max_fi
 	log_t *l = calloc(1, S_LOG_SIZE);
 	if (!l) return NULL;
 
+	
 	int ret;
-	ret =  _iobuf_init(l, max_iobuf_size, cflag, password);
-	if (ret != 0) {
+	ret = _file_init(l, log_file_path, max_file_size, max_file_bak);
+	if(ret != 0) {
 		free(l);
 		return NULL;
 	}
-	
-	ret = _file_init(l, log_file_path, max_file_size, max_file_bak);
-	if(ret != 0) {
-		free(l->io_buf);
+
+	ret =  _iobuf_init(l, max_iobuf_size, cflag, password);
+	if (ret != 0) {
+		free(l->file_path);
 		free(l);
 		return NULL;
 	}
 
 	ret = pthread_mutex_init(&l->mutex, NULL);
-	if (ret != 0) {
-		free(l->io_buf);
-		free(l->file_path);
-		free(l);
-		return NULL;
-	}
+	assert(ret == 0);
+
+	add_handle(&l);
 
 	l->cflag = cflag;
 	
@@ -147,11 +143,15 @@ void log_destory(log_t *lh)
 
 	free(lh->wkey);
 
+	remove_handle(&lh);
+
 	_log_unlock(lh);
 
 	_lock_uninit(lh);
 
 	free(lh);
+
+	lh = NULL;
 }
 
 static size_t _real_len(const char * s)
@@ -258,7 +258,7 @@ static void _update_file(log_t *lh)
 
 void log_flush(log_t *lh)
 {
-	assert(lh != NULL);
+	if (lh == NULL) return;
 	
 	_log_lock(lh);
 
@@ -308,7 +308,7 @@ static void _write_buf(log_t *lh, char *msg, size_t len)
 
 	size_t print_size = fwrite(msg, sizeof(char), len, lh->f_log);
 	if (print_size != len) {
-		fprintf(stderr, "Failed to write the file path(%s), msg(%s)\n", lh->file_path, msg);
+		fprintf(stderr, "Failed to write the file path(%s), len(%lu)\n", lh->file_path, print_size);
 		return;
 	}
 	lh->cur_file_size += print_size;
@@ -321,10 +321,13 @@ static void _write_buf(log_t *lh, char *msg, size_t len)
 	
 }
 
-
 void _log_write(log_t *lh, const log_level_t level, const char *format, ...)
 {
-	assert(lh != NULL);
+	if (lh == NULL) {
+		fprintf(stderr, "logger handle is null!\n");
+		return;
+	}
+
 	assert(format != NULL);
 
 	char log_msg[EX_SINGLE_LOG_SIZE];
