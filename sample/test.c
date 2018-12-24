@@ -33,18 +33,25 @@ void test_write(void* arg)
 	
 	int thd = timekeeper_start_auto();
 	
-	char name[64] = {0};
-	sprintf(name, "./tmp/TEST%d.TXT", t);
-	log_t *l = log_create(name, MAX_FILE_SIZE, MAX_BACK_FILE_NUM, IO_BUFFER_SIZE, FLAG, PASSWORD);
+	char name1[64] = {0};
+	char name2[64] = {0};
+	sprintf(name1, "./tmp/test%d.TXT", t);
+	sprintf(name2, "./tmp/TEST%d.TXT", t);
+	log_t *l1 = log_create(name1, MAX_FILE_SIZE, MAX_BACK_FILE_NUM, IO_BUFFER_SIZE, FLAG, PASSWORD);
+	log_t *l2 = log_create(name2, MAX_FILE_SIZE, MAX_BACK_FILE_NUM, IO_BUFFER_SIZE, FLAG, PASSWORD);
 	const char const msg[] = "So we beat on, boats against the current, borne back ceaselessly into the past.";
 	for (int m = 0; m < PRINT_TIMES; m++) {
+		log_t *l;
+		if (m %2 == 0) l = l1;
+		else l = l2;
 		// only >= LOG_LEVEL will be printed
 		log_debug(l, "[DEBUG]...%s%d\n", msg, m);
 		log_info(l, "[INFO]...%s%d\n", msg, m);
 		log_warn(l, "[WARN]...%s%d\n", msg, m);
 		log_error(l, "[ERROR]...%s%d\n", msg, m);
 	}
-	log_destory(l);
+	log_destory(l1);
+	log_destory(l2);
 	
 	double tim;
 	timekeeper_pause(thd, &tim);
@@ -97,7 +104,15 @@ void restore()
 
 	while ((ptr=readdir(dir)) != NULL) {
 		if(ptr->d_type == 8) {	//file
-			restore_file(ptr->d_name);
+			const char *c = strrchr(ptr->d_name, '.');
+			if (strcmp(c, ".ori") == 0) {
+				// remove old raw log file
+				remove(ptr->d_name);
+			}
+			else {
+				// generate raw log file
+				restore_file(ptr->d_name);
+			}
 		}
 	}
 	closedir(dir);
@@ -107,8 +122,8 @@ void restore()
 
 int main()
 {
-	// make a temparary directory for result
-	(void)mkdir("./tmp", 0755);
+	// make a temparary directory for save result
+	UNUSED_RETURN(mkdir("./tmp", 0755));
 	
 	pthread_t tid[NUM_THREADS];
 	
@@ -122,5 +137,6 @@ int main()
 		pthread_join(tid[i], NULL);
 	}
 
+	// the results are predictable
 	restore();
 }
