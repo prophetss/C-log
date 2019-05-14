@@ -1,350 +1,67 @@
-#include <sys/syscall.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <stdarg.h>
-#include <stdlib.h>
 #include <string.h>
-#include <limits.h>
-#include <errno.h>
-#include <assert.h>
-#include <fcntl.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <sys/syscall.h>	 /* For SYS_xxx definitions */
+#include <stdlib.h>
 #include <time.h>
+#include "error.h"
 #include "md5.h"
 #include "lz4_file.h"
+#include "log_file.h"
+#include "log_stream.h"
 #include "log.h"
 
+static const char* const severity[] = { "[DEBUG]", "[INFO]", "[WARN]", "[ERROR]" };
 
-#define AES_128 	16
-
-#define aes_ex(n)	((n)%AES_128 != 0 ? ((n)/AES_128+1)*AES_128 : (n))
-
-#define EX_SINGLE_LOG_SIZE aes_ex(SINGLE_LOG_SIZE)	//must be sized as a multiple of 16 bytes for aes
-
-extern void add_handle(log_t **l);
-
-extern void remove_handle(log_t **l);
-
-extern int aes_init(uint8_t *key, size_t key_len, uint8_t **w);
-
-extern void cipher(uint8_t *in, uint8_t *out, uint8_t *w);
-
-extern void inv_cipher(uint8_t *in, uint8_t *out, uint8_t *w);
-
-static void _update_file(log_t *lh);
-
-#if !defined(S_ISREG)
-#  define S_ISREG(x) (((x) & S_IFMT) == S_IFREG)
-#endif
-
-static uint64_t _get_file_size(const char *fullfilepath)
+log_handle_t* stream_handle_create(uint8_t streams)
 {
-	int ret;
-	struct stat sbuf;
-	ret = stat(fullfilepath, &sbuf);
-	if (ret || !S_ISREG(sbuf.st_mode)) return 0;
-    return (uint64_t)sbuf.st_size;
-}
-
-static void _log_lock(log_t *l)
-{
-	pthread_mutex_lock(&l->mutex);
-}
-
-static void _log_unlock(log_t *l)
-{
-	pthread_mutex_unlock(&l->mutex);
-}
-
-static int _pwd_init(uint8_t **wkey, const char *pwd)
-{
-	uint8_t key[MD5_HASHBYTES];		//MD5_HASHBYTES==AES_128==16byte
-	MD5Data((uint8_t*)pwd, strlen(pwd), key);
-	return aes_init(key, AES_128, wkey);
-}
-
-static int _iobuf_init(log_t *lh, size_t io_ms, int flag, const char *pwd)
-{
-	lh->io_cap = io_ms;
-
-	lh->io_buf = calloc(1, lh->io_cap);
-	
-	if (!lh->io_buf) return 1;
-
-	if (flag & ENCRYPT) {
-		assert(pwd != NULL);
-		if (0 != _pwd_init(&lh->wkey, pwd)) {
-			free(lh->io_buf);
-			return 1;
-		}
-	}
-	
-	return 0;
-}
-
-static int _file_init(log_t *lh, const char *lp, size_t ms, size_t mb)
-{
-	lh->max_file_size = ms;
-	lh->file_path = strdup(lp);
-	if (!lh->file_path) return 1;
-	lh->cur_file_size = _get_file_size(lp);
-	lh->cur_bak_num = 0;
-	lh->max_bak_num = mb;
-	return 0;
+	log_handle_t* lh = calloc(1, S_LOG_HANDLE_T);
+	if (!lh) exit_throw("failed to calloc!");
+	lh->tag = S_MODE;
+	lh->hld = _stream_handle_create(streams);
+	return lh;
 }
 
 
-log_t* log_create(const char *log_file_path, size_t max_file_size, size_t max_file_bak, size_t max_iobuf_size, int cflag, const char *password)
+log_handle_t* file_handle_create(const char* log_filename, size_t max_file_size, size_t max_file_num, size_t max_iobuf_size, uint8_t cflag, const char* password)
 {
-	assert(log_file_path);
-
-	log_t *l = calloc(1, S_LOG_SIZE);
-	if (!l) return NULL;
-
-	
-	int ret;
-	ret = _file_init(l, log_file_path, max_file_size, max_file_bak);
-	if(ret != 0) {
-		free(l);
-		return NULL;
-	}
-
-	ret =  _iobuf_init(l, max_iobuf_size, cflag, password);
-	if (ret != 0) {
-		free(l->file_path);
-		free(l);
-		return NULL;
-	}
-
-	ret = pthread_mutex_init(&l->mutex, NULL);
-	assert(ret == 0);
-
-	add_handle(&l);
-
-	l->cflag = cflag;
-	
-	return l;
+	log_handle_t* lh = calloc(1, S_LOG_HANDLE_T);
+	if (!lh) exit_throw("failed to calloc!");
+	lh->tag = F_MODE;
+	lh->hld = _file_handle_create(log_filename, max_file_size, max_file_num, max_iobuf_size, cflag, password);
+	return lh;
 }
 
-static void _lock_uninit(log_t *l)
+log_t* add_to_handle_list(log_t* lhs, void* hld)
 {
-	pthread_mutex_destroy(&l->mutex);
-}
-
-void log_destory(log_t *lh)
-{
-	if (lh == NULL) return;
-
-	_log_lock(lh);
-
-	_update_file(lh);
-
-	free(lh->io_buf);
-
-	free(lh->wkey);
-
-	remove_handle(&lh);
-
-	_log_unlock(lh);
-
-	_lock_uninit(lh);
-
-	free(lh);
-
-	lh = NULL;
-}
-
-static size_t _real_len(const char * s)
-{
-	for (int i =0; i < AES_128; i++)
-		if (!s[i]) return i;
-	return AES_128;
-}
-
-static int _file_decipher(const char *in_filepath, size_t in_filesize, const char *out_filepath, uint8_t *w)
-{
-	FILE *fi, *fo;
-	
-	fi = fopen(in_filepath, "r");
-	if (fi == NULL) {
-		perror("Failed to open the in file!");
-		return 1;
-	}
-	
-	fo = fopen(out_filepath, "a+");
-	if (fo == NULL) {
-		fclose(fi);
-		perror("Failed to open the out file!");
-		return 1;
-	}
-
-	while (in_filesize > 0) {
-		char outbuf[AES_128];
-		if (fread(outbuf, sizeof(char), AES_128, fi) != AES_128) break;
-		inv_cipher((uint8_t*)outbuf, (uint8_t*)outbuf, w);
-		//cut off the end of zeros
-		const size_t len = _real_len(outbuf);
-		if (fwrite(outbuf, sizeof(char), len, fo) != len) break;
-		in_filesize -= AES_128;
-	}
-
-	fclose(fi);
-	fclose(fo);
-
-	if (in_filesize > 0) return 1;
-	
-	return 0;
-}
-
-int log_decipher(const char *in_filename, const char *out_filename, const char *password)
-{
-	assert(in_filename != NULL);
-	assert(out_filename != NULL);
-	assert(password != NULL);
-	
-	uint8_t *w = NULL;
-	if (0 != _pwd_init(&w, password)) return 1;
-	uint64_t file_size = _get_file_size(in_filename);
-	if (file_size == 0 || file_size % AES_128 != 0) {
-		fprintf(stderr, "Input file error!\n");
-		free(w);
-		return 1;
-	}
-
-	int ret = _file_decipher(in_filename, file_size, out_filename, w);
-
-	free(w);
-
-	if (ret != 0) return ret;
-	
-	return 0;
-}
-
-static void  _file_compress(const char *src_filename, const char *dst_filename)
-{
-	lz4_file_compress(src_filename, dst_filename);
-}
-
-static void _backup_file(log_t *lh)
-{
-	char new_filename[PATH_MAX] = {0};
-	
-	if (lh->cflag & COMPRESS) {	//compress
-		sprintf(new_filename, "%s.bak%lu.lz4", lh->file_path, lh->cur_bak_num % lh->max_bak_num);
-		_file_compress(lh->file_path, new_filename);
-		remove(lh->file_path);
-	}
-	else {
-		sprintf(new_filename, "%s.bak%lu", lh->file_path, lh->cur_bak_num % lh->max_bak_num);
-		rename(lh->file_path, new_filename);
-	}
-}
-
-static void _update_file(log_t *lh)
-{
-	if (!lh->f_log) return;
-	
-	fclose(lh->f_log);
-	lh->f_log = NULL;
-	if (lh->max_bak_num == 0) {	//without backup
-		remove(lh->file_path);
-	}
-	else {
-		_backup_file(lh);
-	}
-	lh->cur_bak_num++;
-	lh->cur_file_size = 0;
-}
-
-void log_flush(log_t *lh)
-{
-	if (lh == NULL) return;
-	
-	_log_lock(lh);
-
-	_update_file(lh);
-
-	_log_unlock(lh);
+	return list_insert_beginning(lhs, hld);
 }
 
 
-static int _file_handle_request(log_t *lh)
+void _log_write(uint32_t mode, log_t *lhs, log_level_t level, const char *format, ...)
 {
-	if (lh->f_log) return 0;
-
-	lh->f_log = fopen(lh->file_path, "a+");
-
-	if (!lh->f_log) return 1;
-
-	if (setvbuf(lh->f_log, lh->io_buf, _IOFBF, lh->io_cap) != 0) return 1;
-	
-	return 0;
-}
-
-void _buf_encrypt(char *msg, uint8_t *wkey, size_t len)
-{
-	uint8_t out[AES_128];
-	size_t i = 0;
-	while(len > i) {
-		cipher((uint8_t*)msg + i, out, wkey);
-		memcpy(msg+i, out, AES_128);
-		i+= AES_128;
-	}
-}
-
-static void _write_buf(log_t *lh, char *msg, size_t len)
-{
-	if (lh->cflag & ENCRYPT) {
-		len = aes_ex(len);
-		_buf_encrypt(msg, lh->wkey, len);
-	}
-
-	_log_lock(lh);
-
-	if (0 != _file_handle_request(lh)) {
-		fprintf(stderr, "Failed to open the file, path: %s\n", lh->file_path);
+	if (!lhs) {
+		error_display("Log handle is null!\n");
 		return;
 	}
 
-	size_t print_size = fwrite(msg, sizeof(char), len, lh->f_log);
-	if (print_size != len) {
-		fprintf(stderr, "Failed to write the file path(%s), len(%lu)\n", lh->file_path, print_size);
+	if (!format) {
+		error_display("Log format is null!\n");
 		return;
 	}
-	lh->cur_file_size += print_size;
-	
-	if (lh->cur_file_size > lh->max_file_size) {
-		_update_file(lh);
-	}
-
-	_log_unlock(lh);
-	
-}
-
-void _log_write(log_t *lh, const log_level_t level, const char *format, ...)
-{
-	if (lh == NULL) {
-		fprintf(stderr, "logger handle is null!\n");
-		return;
-	}
-
-	assert(format != NULL);
-
-	char log_msg[EX_SINGLE_LOG_SIZE];
-	memset(log_msg, 0, EX_SINGLE_LOG_SIZE);
 
 	va_list args;
 	va_start(args, format);
 
-	static const char* const severity[] = {"[DEBUG]", "[INFO]", "[WARN]", "[ERROR]"};
+	char log_msg[EX_SINGLE_LOG_SIZE] = { 0 };
 
 /* debug message */
-#if (LOG_LEVEL == LOG_DEBUG)
+#if (LOG_DEBUG_MESSAGE != 0)
 	time_t rawtime = time(NULL);
 	struct tm timeinfo;
 	localtime_r(&rawtime, &timeinfo);
 	pid_t tid = syscall(SYS_gettid);
-	int info_len = snprintf(log_msg, SINGLE_LOG_SIZE, "%s%04d-%02d-%02d %02d:%02d:%02d %s<%s> %d: ", severity[level], timeinfo.tm_year + 1900,
+	int info_len = snprintf(log_msg, EX_SINGLE_LOG_SIZE, "%s%04d-%02d-%02d %02d:%02d:%02d %s<%s> %d: ", severity[level], timeinfo.tm_year + 1900,
 						timeinfo.tm_mon + 1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, va_arg(args, char*), va_arg(args, char*), tid);
 #else
 	int info_len = strlen(severity[level]);
@@ -355,25 +72,62 @@ void _log_write(log_t *lh, const log_level_t level, const char *format, ...)
 	va_end(args);
 	
 	if (total_len <= 0 || info_len <= 0 || total_len > SINGLE_LOG_SIZE - info_len) {
-		fprintf(stderr, "Failed to vsnprintf a text entry: (total_len) %d\n", total_len);
+		error_display("Failed to vsnprintf a text entry: (total_len) %d\n", total_len);
 		return;
 	}
-	
 	total_len += info_len;
 	
-	_write_buf(lh, log_msg, total_len);
+	while (lhs) {
+		switch((((log_handle_t*)(lhs->data))->tag)&mode) {
+			case F_MODE:
+				write_file((handle_file_t*)(((log_handle_t*)(lhs->data))->hld), log_msg, total_len);
+				break;
+			case S_MODE:
+				write_stream((handle_stream_t*)(((log_handle_t*)(lhs->data))->hld), level, log_msg);
+				break;
+			default:
+				break;
+			}
+		lhs = lhs->next;
+	}
 }
 
-char* log_md5(const char *filename, char *digest)
+
+void log_flush(log_t *lhs)
+{
+	stream_handle_flush();	//stdout flush only once
+	while (lhs && (((log_handle_t*)(lhs->data))->tag) == F_MODE) {
+		file_handle_flush((handle_file_t*)(((log_handle_t*)(lhs->data))->hld));
+		lhs = lhs->next;
+	}
+}
+
+void log_destory(log_t* lhs)
+{
+	while (lhs) {
+		switch ((((log_handle_t*)(lhs->data))->tag)) {
+			case F_MODE:
+				file_handle_destory((handle_file_t*)(((log_handle_t*)(lhs->data))->hld));
+				break;
+			case S_MODE:
+				stream_handle_destory((handle_stream_t*)(((log_handle_t*)(lhs->data))->hld));
+				break;
+			default:
+				break;
+		}
+		lhs = lhs->next;
+	}
+}
+
+char* log_file_md5(const char* filename, char* digest)
 {
 	assert(filename != NULL);
 	return MD5File_S(filename, digest);
 }
 
-int log_uncompress(const char *src_filename, const char *dst_filename)
+int log_file_uncompress(const char* src_filename, const char* dst_filename)
 {
 	assert(src_filename != NULL);
 	assert(dst_filename != NULL);
- 	return lz4_file_uncompress(src_filename, dst_filename);
+	return lz4_file_uncompress(src_filename, dst_filename);
 }
-

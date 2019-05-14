@@ -49,23 +49,18 @@ static void _timekeeper_initialize(void)
 
 static void _timekeeper_lock(void)
 {
-#ifdef MULTITHREAD
 	_timekeeper_initialize();
 	pthread_mutex_lock(&_timekeeper_mutex);
-#else
 	if (!_is_initialized)
 	{
 		memset(_ptimekeeper, 0, TIMEKEEPER_NUM * sizeof(struct safe_timespec));
 		_is_initialized = 1;
 	}
-#endif
 }
 
 static void _timekeeper_unlock(void)
 {
-#ifdef MULTITHREAD
 	pthread_mutex_unlock(&_timekeeper_mutex);
-#endif
 }
 
 static int _timekeeper_get(int n)

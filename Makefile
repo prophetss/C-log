@@ -1,12 +1,28 @@
-SRC = cipher/aes.c cipher/md5.c compress/lz4_file.c compress/lz4.c trace.c log.h log.c sample/timer.c sample/test.c
-DEBUG =	-O0 -Wall -Wextra -ggdb
+######################################################
+#make parameter
+#debug/release
+ver		= release
+######################################################
 
-all: $(SRC)
-	gcc -I./compress -I./cipher -I../ -O2 -Wall -Wextra -o log_sample $^ -lpthread
+CC		= gcc
+DIRS = . ./log ./util ./lz4 ./sample
+CFLAGS 	= -D_DEBUG -O0 -Wall -Wextra -ggdb
+INCLUDE_DIR = -I. -I./log -I./util -I./lz4 -I./sample
+LIB_L 	= -lpthread
+TARGET	= log_sample_d
 
-debug: $(SRC)
-	gcc -I./compress -I./cipher -I../ $(DEBUG) -o log_sample_d $^ -lpthread
+ifeq ($(ver), release)
+	CFLAGS = -O2 -Wall -Wextra
+	TARGET = log_sample_r
+endif
 
-.PHONY: clean
+FIND_FILES_CPP = $(wildcard $(dir)/*.c)
+SOURCES = $(foreach dir, $(DIRS), $(FIND_FILES_CPP))
+
+$(TARGET): $(SOURCES)
+	$(CC) $(INCLUDE_DIR) $(CFLAGS) -o $@ $^ $(LIB_L)
+
+	
+.PHONY:clean
 clean:
-	rm log_sample log_sample_d -f
+	rm log_sample_d log_sample

@@ -158,7 +158,6 @@ void lz4_file_compress(const char *in_filename, const char *out_filename)
 	free(src_buf);
 }
 
-
 int _check_block(lz4_header_t *lhd, char *data)
 {
 	BYTE digest[MD5_HASHBYTES];
@@ -178,7 +177,6 @@ int _data_disassemble(FILE *f, char **block_data, lz4_header_t *lhd)
 	if (0 != _check_block(lhd, *block_data)) return 1;
 	return 0;
 }
-
 
 int _lz4_uncompress(const char *src, size_t src_size, char **dst, size_t dst_size)
 {

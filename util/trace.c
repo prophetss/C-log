@@ -1,19 +1,17 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <execinfo.h>
+#include "list.h"
 #include "log.h"
 
 
 #define UNUSED_RETURN(x)	(void)((x)+1)
 
-static log_t* lhs[MAX_HANDLE_NUM];
-
-
 static volatile int _is_initialized = 0;
-
 
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static list_node *g_handle_list = NULL;
 
 static void trace_print(int signal_type)
 {
@@ -42,10 +40,10 @@ static void signal_hadle_fun(int signal_type)
 {
 	fprintf(stderr, "receive a exit signal!\n");
 	pthread_mutex_lock(&g_mutex);
-	for (int i =0; i < MAX_HANDLE_NUM; i++) {
-		if (lhs[i] != NULL) {
-			log_flush(lhs[i]);
-		}
+	list_node *it = g_handle_list;
+	while(it) {
+		log_flush((log_t*)it->data);
+		it = it->next;
 	}
 	pthread_mutex_unlock(&g_mutex);
 	fprintf(stderr, "all logger handles flush!\n");
@@ -56,6 +54,8 @@ static void signal_hadle_fun(int signal_type)
 static void trace_init()
 {
 	if (_is_initialized) return;
+
+	g_handle_list = list_create(NULL);
 	
 	signal(SIGHUP, signal_hadle_fun);
 	signal(SIGINT, signal_hadle_fun);
@@ -69,38 +69,25 @@ static void trace_init()
 	signal(SIGSEGV, signal_hadle_fun);
 	signal(SIGPIPE, signal_hadle_fun);
 	signal(SIGTERM, signal_hadle_fun);
+	
 	_is_initialized = 1;
 }
 
-void add_handle(log_t **l)
+void trace_add_handle(void **l)
 {
 	pthread_mutex_lock(&g_mutex);
 	trace_init();
-	int i;
-	for (i = 0; i < MAX_HANDLE_NUM; i++) {
-		if (lhs[i] == NULL) {
-			lhs[i] = *l;
-			break;
-		}
-	}
+	g_handle_list = list_insert_beginning(g_handle_list, *l);
 	pthread_mutex_unlock(&g_mutex);
-	if (i == MAX_HANDLE_NUM) {
-		fprintf(stderr, "ERROR: a limit on the number of logger handles, it may cause loss of io buffer logging data(process terminated abnormally)!\n");
-	}
 }
 
-void remove_handle(log_t **l)
+void trace_remove_handle(void **l)
 {
 	pthread_mutex_lock(&g_mutex);
-	int i;
-	for (i = 0; i < MAX_HANDLE_NUM; i++) {
-		if (lhs[i] == *l) {
-			lhs[i] = NULL;
-			break;
-		}
+	list_remove_by_data(&g_handle_list, *l);
+	if (!g_handle_list->data && !g_handle_list->next) {
+		list_destroy(&g_handle_list);
+		_is_initialized = 0;
 	}
 	pthread_mutex_unlock(&g_mutex);
-	if (i == MAX_HANDLE_NUM) {
-		fprintf(stderr, "Error: not found the logger handle!\n");
-	}
 }
